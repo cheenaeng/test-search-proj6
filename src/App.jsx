@@ -1,34 +1,108 @@
 import './App.css';
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { matchSorter } from 'match-sorter';
 import nlp from 'compromise';
+import datePlugin from 'compromise-dates';
+import fuzzysearch from 'fuzzysearch';
+import { distance } from 'fastest-levenshtein';
 import ingredientsList from './testRegex.js';
+import ocrResponse from './testOCR.js';
+
+nlp.plugin(datePlugin);
 
 function App() {
   const [input, setInput] = useState('');
   const [display, showDisplay] = useState([]);
   const ingredientsListSplit = ingredientsList.map((item) => ({ keyWords: item.split(' '), itemName: item }));
+  const [ocrTest, setOcrTest] = useState([]);
+
+  console.log(ocrTest);
 
   const processInput = (inputTerms) => {
+    const originalTerm = inputTerms;
     const doc = nlp(inputTerms);
-    // doc.adjectives().remove()
-    // doc.verbs().remove()
+    const regex = /(?:\d.\d{1,3}\s?(x|X)\s?\d.\d{1,3})/g;
+    const receiptKeyWords = ['change', 'cash', 'gst', 'tax', 'invoice', 'fairprice', 'purchased', 'rounding'];
+    if (inputTerms.includes('#')
+    || inputTerms.match(regex) !== null
+    || doc.dates().get().length !== 0
+    || receiptKeyWords.some((word) => inputTerms.includes(word))) {
+      return '';
+    }
     doc.possessives().strip();
     doc.prepositions().remove();
     doc.pronouns().remove();
-    doc.adjectives().remove();
-    // doc.places().remove()
-    // const removedArticles = doc.not('the').not('a').not('an')
-    console.log(doc.nouns().text());
-    return doc.nouns().text();
+    doc.numbers().remove();
+    doc.places().remove();
+    doc.urls().remove();
+    doc.match('roast').remove();
+
+    const removedArticles = doc.not('the').not('a').not('an');
+    return { original: originalTerm, processed: removedArticles.nouns().text() };
   };
 
-  // logic basis - to get an exact match first, if fails then do the rest
-  // logic - if there is an exact match, set exact match first
+  const matchChecker = (detectedInput, originalName) => {
+    const splitInput = detectedInput.split(' ');
 
-  // if no exact match, check the processed input against each keyword in the list of ingredient list
+    if (detectedInput.length !== 0) {
+      // confirmed matches
+      const checkExactMatch = matchSorter(ingredientsListSplit, detectedInput, { keys: ['itemName'] });
+      if (checkExactMatch.length > 0) {
+        setOcrTest((prev) => ([...prev, { parsedName: originalName, word: detectedInput, match: checkExactMatch.flat() }]));
+      } else {
+        // unsure matches
+        const likelyMatches = [];
+        ingredientsListSplit.forEach((ingredient) => {
+          ingredient.keyWords.forEach((word) => {
+            if (fuzzysearch(detectedInput, word) || fuzzysearch(word, detectedInput)) {
+              console.log(detectedInput);
+              const similarityValue = distance(detectedInput, ingredient.itemName);
+              console.log(similarityValue, word);
+              likelyMatches.push({ ...ingredient, value: similarityValue });
+              const found = likelyMatches.some((match) => match.itemName === ingredient.itemName);
+              if (!found) likelyMatches.push({ ...ingredient, value: similarityValue });
+            }
+          });
+        });
+        likelyMatches.sort((a, b) => a.value - b.value);
 
-  // if really no exact match, then check each processed input (split by space) against each keyword in the ingredient list
+        if (likelyMatches.length > 0) {
+          setOcrTest((prev) => ([...prev, { parsedName: originalName, word: detectedInput, match: likelyMatches }]));
+        } else {
+          // unsure matches
+          const possibleMatches = [];
+          for (let i = 0; i < ingredientsListSplit.length; i += 1) {
+            ingredientsListSplit[i].keyWords.forEach((word) => {
+              splitInput.forEach((inputWord) => {
+                if (fuzzysearch(inputWord, word)) {
+                  const currentIngredient = ingredientsListSplit[i];
+                  const similarityValue = distance(detectedInput, ingredientsListSplit[i].itemName);
+                  const found = possibleMatches.some((match) => match.itemName === currentIngredient.itemName);
+                  if (!found) possibleMatches.push({ ...currentIngredient, value: similarityValue });
+                } });
+            });
+          }
+          possibleMatches.sort((a, b) => a.value - b.value);
+          // ingredientsListSplit.forEach((ingredient) => {
+          //   console.log(closest(detectedInput, ingredient.itemName));
+          // });
+          setOcrTest((prev) => ([...prev, { parsedName: originalName, word: detectedInput, match: possibleMatches }]));
+        }
+      }
+    }
+  };
+
+  useEffect(() => {
+    const ocr = ocrResponse[0].description.split('\n');
+    console.log(ocr);
+    ocr.forEach((lineItem) => {
+      const { original, processed } = processInput(lineItem.toLowerCase());
+      console.log(processed);
+      if (processed !== undefined) {
+        matchChecker(processed, original);
+      }
+    });
+  }, []);
 
   const handleInput = (e) => {
     showDisplay([]);
@@ -38,6 +112,7 @@ function App() {
     const processedInput = processInput(inputValue);
     const splitInput = processedInput.split(' ');
     console.log(processedInput.length);
+
     if (processedInput.length !== 0) {
       const checkExactMatch = matchSorter(ingredientsListSplit, processedInput, { keys: ['itemName'] });
       console.log(checkExactMatch);
@@ -50,8 +125,22 @@ function App() {
         if (checkKeyWordsMatch.length > 0) {
           showDisplay(checkKeyWordsMatch.flat());
         } else {
-          const matchedWords = splitInput.map((word) => matchSorter(ingredientsListSplit, word, { keys: ['keyWords'] }));
-          showDisplay(matchedWords.flat());
+          // check each keyword in the input and match each keyword of input with the keyword of each ingredient --> if true --> return the itenName
+
+          const possibleMatches = [];
+          for (let i = 0; i < ingredientsListSplit.length; i += 1) {
+            console.log(ingredientsListSplit[i]);
+            ingredientsListSplit[i].keyWords.forEach((word) => {
+              splitInput.forEach((inputWord) => {
+                console.log(inputWord);
+                if (fuzzysearch(inputWord, word)) {
+                  possibleMatches.push(ingredientsListSplit[i]);
+                }
+              });
+            });
+          }
+          console.log(possibleMatches);
+          showDisplay(possibleMatches);
         }
       }
     }
@@ -64,6 +153,16 @@ function App() {
       <button type="button">Submit</button>
       <div>
         {display.splice(0, 3).map((ingredient) => <p>{ingredient.itemName}</p>)}
+        {ocrTest.map((x) => x.match.splice(0, 1).map((ingredient) => (
+          <p>
+            {x.parsedName}
+            {' '}
+            {'>>>'}
+            {' '}
+            {ingredient.itemName}
+          </p>
+        )))}
+
       </div>
     </div>
   );
